@@ -23,6 +23,7 @@ type Route struct {
 	Src      string
 	Dst      string
 	Priority uint32
+	NextHop  string // Added for NextHop
 }
 
 type InterfaceAddressSelector func([]*InterfaceAddress, net.IP, net.IP) *InterfaceAddress
@@ -43,9 +44,30 @@ func (r *Route) DstNet() *net.IPNet {
 	return n
 }
 
+// NextHopIP Added for NextHop
+// Parse `string` NextHop to `net.IP` NextHopIP
+func (r *Route) NextHopIP() net.IP {
+	return net.ParseIP(r.NextHop)
+}
+
 func FirstAddressSelector(a []*InterfaceAddress, src, dst net.IP) *InterfaceAddress {
 	if len(a) > 0 {
 		return a[0]
+	}
+	return nil
+}
+
+// FitAddressSelector Added for NextHop
+// Select Correct Address to Reach NextHop
+func FitAddressSelector(a []*InterfaceAddress, src, dst net.IP) *InterfaceAddress {
+	for _, A := range a {
+		var ipNet = net.IPNet{
+			IP:   A.IP,
+			Mask: A.Netmask,
+		}
+		if ipNet.Contains(dst) {
+			return A
+		}
 	}
 	return nil
 }
@@ -92,6 +114,7 @@ func (r *Router) AddRoutes(priority uint32, routes ...*Route) {
 			Selector: route.Selector(),
 			Priority: route.Priority + priority,
 			Iface:    iface.Id,
+			NextHop:  route.NextHopIP(), // Added for NextHop
 		}
 		if len(route.DstNet().IP) == net.IPv4len {
 			r.v4 = append(r.v4, rt)
@@ -140,6 +163,35 @@ func (r *Router) RouteWithSrc(src, dst net.IP) (iface *Interface, preferredSrc *
 	return iface, selector(iface.Addresses(), src, dst), nil
 }
 
+// RouteWithNextHop Added for NextHop
+// Add nextHop as return
+func (r *Router) RouteWithNextHop(src, dst net.IP) (iface *Interface, preferredSrc *InterfaceAddress, nextHop net.IP, err error) {
+	var rt *RTInfo
+	switch {
+	case dst.To4() != nil:
+		rt, err = r.route(r.v4, src, dst)
+	case dst.To16() != nil:
+		rt, err = r.route(r.v6, src, dst)
+	default:
+		err = errors.New("IP is not valid as IPv4 or IPv6")
+	}
+
+	if err != nil {
+		return
+	}
+	iface = r.ifaces[rt.Iface]
+
+	var selector InterfaceAddressSelector = FitAddressSelector // Use This to cope with NextHop
+	//if rt.Selector != nil {
+	//	selector = rt.Selector
+	//}
+	var target = dst
+	if rt.NextHop != nil {
+		target = rt.NextHop
+	}
+	return iface, selector(iface.Addresses(), src, target), rt.NextHop, nil
+}
+
 func (r *Router) route(routes routeSlice, src, dst net.IP) (rt *RTInfo, err error) {
 	for _, rt = range routes {
 		if rt.Src != nil && !rt.Src.Contains(src) {
@@ -159,6 +211,7 @@ type RTInfo struct {
 	Selector InterfaceAddressSelector
 	Priority uint32
 	Iface    int64
+	NextHop  net.IP // Added for NextHop
 }
 
 type routeSlice []*RTInfo
@@ -220,30 +273,35 @@ func main() {
 			Dst:      "0.0.0.0/0",
 			Src:      "0.0.0.0/0",
 			Priority: 0,
+			NextHop:  "192.168.1.3", // Added for NextHop
 		},
 		&Route{
 			iface:    iface1,
 			Dst:      "172.16.1.0/24",
 			Src:      "0.0.0.0/0",
 			Priority: 0,
+			NextHop:  "192.168.1.2", // Added for NextHop
 		},
 		&Route{
 			iface:    iface2,
 			Dst:      "172.16.1.0/26",
 			Src:      "0.0.0.0/0",
 			Priority: 0,
+			NextHop:  "10.0.0.1", // Added for NextHop
 		},
 		&Route{
 			iface:    iface2,
 			Dst:      "172.16.2.0/24",
 			Src:      "0.0.0.0/0",
 			Priority: 0,
+			NextHop:  "10.0.0.10", // Added for NextHop
 		},
 		&Route{
 			iface:    iface2,
 			Dst:      "172.16.3.0/24",
 			Src:      "0.0.0.0/0",
 			Priority: 0,
+			NextHop:  "10.0.0.1", // Added for NextHop
 		},
 	}
 	router.AddRoutes(0, rt...)
@@ -254,21 +312,43 @@ func main() {
 
 	//从192.168.1.2到IP 223.5.5.5
 	iface, addr, _ := router.RouteWithSrc(net.ParseIP("192.168.1.2"), net.ParseIP("223.5.5.5"))
-	fmt.Printf("to 223.5.5.5, VIA %#s, Next: %#s\n", iface.Name, addr.Gateway.String())
+	fmt.Printf("to 223.5.5.5, \tVIA %#s, \tNext: %#s\n", iface.Name, addr.Gateway.String())
 
 	//从192.168.1.2到172.16.1.100
 	iface, addr, _ = router.RouteWithSrc(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.1.100"))
-	fmt.Printf("to 172.16.1.100, VIA %#s, Next: %#s\n", iface.Name, addr.Gateway.String())
+	fmt.Printf("to 172.16.1.100, \tVIA %#s, \tNext: %#s\n", iface.Name, addr.Gateway.String())
 
 	//从192.168.1.2到172.16.1.10
 	iface, addr, _ = router.RouteWithSrc(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.1.10"))
-	fmt.Printf("to 172.16.1.10, VIA %#s, Next: %#s\n", iface.Name, addr.Gateway.String())
+	fmt.Printf("to 172.16.1.10, \tVIA %#s, \tNext: %#s\n", iface.Name, addr.Gateway.String())
 
 	//从192.168.1.2到172.16.2.100
 	iface, addr, _ = router.RouteWithSrc(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.2.100"))
-	fmt.Printf("to 172.16.2.100, VIA %#s, Next: %#s\n", iface.Name, addr.Gateway.String())
+	fmt.Printf("to 172.16.2.100, \tVIA %#s, \tNext: %#s\n", iface.Name, addr.Gateway.String())
 
 	//从192.168.1.3到172.16.2.100
 	iface, addr, _ = router.RouteWithSrc(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.3.100"))
-	fmt.Printf("to 172.16.3.100, VIA %#s, Next: %#s\n", iface.Name, addr.Gateway.String())
+	fmt.Printf("to 172.16.3.100, \tVIA %#s, \tNext: %#s\n", iface.Name, addr.Gateway.String())
+
+	fmt.Println("-- TESTING WITH NEXT_HOP --")
+
+	//从192.168.1.2到IP 223.5.5.5
+	iface, addr, nextHop, _ := router.RouteWithNextHop(net.ParseIP("192.168.1.2"), net.ParseIP("223.5.5.5"))
+	fmt.Printf("to 223.5.5.5,    VIA %#s, \tUsing Addr IP: %16s, \tNextHop: %#s\n", iface.Name, addr.IP.String(), nextHop.String())
+
+	//从192.168.1.2到172.16.1.100
+	iface, addr, nextHop, _ = router.RouteWithNextHop(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.1.100"))
+	fmt.Printf("to 172.16.1.100, VIA %#s, \tUsing Addr IP: %16s, \tNextHop: %#s\n", iface.Name, addr.IP.String(), nextHop.String())
+
+	//从192.168.1.2到172.16.1.10
+	iface, addr, nextHop, _ = router.RouteWithNextHop(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.1.10"))
+	fmt.Printf("to 172.16.1.10,  VIA %#s, \tUsing Addr IP: %16s, \tNextHop: %#s\n", iface.Name, addr.IP.String(), nextHop.String())
+
+	//从192.168.1.2到172.16.2.100
+	iface, addr, nextHop, _ = router.RouteWithNextHop(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.2.100"))
+	fmt.Printf("to 172.16.2.100, VIA %#s, \tUsing Addr IP: %16s, \tNextHop: %#s\n", iface.Name, addr.IP.String(), nextHop.String())
+
+	//从192.168.1.3到172.16.2.100
+	iface, addr, nextHop, _ = router.RouteWithNextHop(net.ParseIP("192.168.1.2"), net.ParseIP("172.16.3.100"))
+	fmt.Printf("to 172.16.3.100, VIA %#s, \tUsing Addr IP: %16s, \tNextHop: %#s\n", iface.Name, addr.IP.String(), nextHop.String())
 }
